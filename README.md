@@ -25,6 +25,5 @@
 打开终端（CMD 或 PowerShell），执行以下命令一次性安装所有需要的纯 Python 库：
 ```bash
 pip install mss pynput google-generativeai Pillow pyinstaller pyautogui ddddocr
-
----
-#注:需要在windows系统运行
+```
+bcbn

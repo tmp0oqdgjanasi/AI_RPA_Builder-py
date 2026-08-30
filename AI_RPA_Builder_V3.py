@@ -3,7 +3,7 @@ import os
 import mss
 import re
 import json
-from pynput import mouse
+from pynput import mouse, keyboard
 import google.generativeai as genai
 from PIL import Image
 import subprocess
@@ -27,10 +27,8 @@ def load_or_prompt_api_key():
         print("[配置加载] 已成功从本地 config.json 读取 API Key。")
         return api_key
 
-    # 首次运行弹窗
     root = tk.Tk()
     root.title("首次运行 - 配置 Gemini API Key")
-    
     window_width, window_height = 380, 200
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
@@ -71,7 +69,6 @@ def load_or_prompt_api_key():
         print("未输入 API Key，程序退出。")
         exit()
 
-# 获取 API Key 并初始化模型
 API_KEY = load_or_prompt_api_key()
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel('gemini-3-flash') 
@@ -79,14 +76,20 @@ model = genai.GenerativeModel('gemini-3-flash')
 # 全局变量
 recorded_actions = []
 screenshots = []
-is_recording = False
 sct = mss.mss()
+
+# 录制状态控制: 
+# 0 = 未开始第一次录制
+# 1 = 正在进行第一次录制
+# 2 = 第一次录制已结束，等待开始第二次
+# 3 = 正在进行第二次录制
+# 4 = 第二次录制已结束，准备提交处理
+recording_stage = 0 
 
 # ================= 弹窗菜单：选择输出格式 =================
 def get_user_choice():
     root = tk.Tk()
     root.title("AI RPA 构建器 Ultimate")
-    
     window_width, window_height = 320, 240
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
@@ -96,7 +99,7 @@ def get_user_choice():
     root.attributes('-topmost', True)
 
     var_py = tk.BooleanVar(value=False)
-    var_exe = tk.BooleanVar(value=True)  # 默认生成 EXE
+    var_exe = tk.BooleanVar(value=True)
     var_java = tk.BooleanVar(value=False)
     
     tk.Label(root, text="请选择需要生成的格式（可多选）：", font=("Arial", 11, "bold")).pack(pady=15)
@@ -115,7 +118,7 @@ def get_user_choice():
             return
         root.destroy()
         
-    tk.Button(root, text="确认开始录制", width=15, command=on_confirm, bg="#2196F3", fg="white", font=("Arial", 10, "bold")).pack(pady=20)
+    tk.Button(root, text="确认并开始", width=15, command=on_confirm, bg="#2196F3", fg="white", font=("Arial", 10, "bold")).pack(pady=20)
     root.mainloop()
     return selected_targets
 
@@ -124,24 +127,57 @@ if not targets:
     exit()
 
 print(f"[就绪] 已选择格式: {targets}")
-print("=== 鼠标监听已开启: 左键演示操作，中键(滚轮)结束并生成 ===")
+print("\n==================================================")
+print("【提示】请切换到目标界面：")
+print("1. 按下【空格键】 -> 弹出提示，开始【第一次录制】")
+print("2. 再次按下【空格键】 -> 弹出提示，结束【第一次录制】")
+print("3. 再次按下【空格键】 -> 弹出提示，开始【第二次录制】")
+print("4. 最后按下【空格键】 -> 弹出提示，结束【第二次录制】并提交AI生成！")
+print("==================================================\n")
 
-# ================= 录制逻辑 =================
+# 辅助弹窗提示函数
+def show_popup(title, message):
+    def _show():
+        root = tk.Tk()
+        root.withdraw() # 隐藏主窗口
+        root.attributes('-topmost', True)
+        messagebox.showinfo(title, message)
+        root.destroy()
+    # 开启小线程弹窗，避免阻塞键盘监听
+    import threading
+    threading.Thread(target=_show).start()
+
+# ================= 监听逻辑 (键盘空格 + 鼠标轨迹) =================
+def on_press(key):
+    global recording_stage
+    try:
+        if key == keyboard.Key.space:
+            if recording_stage == 0:
+                recording_stage = 1
+                print("\n[状态] 开始【第一次录制】...")
+                show_popup("提示", "【第一次录制】已开始！请执行您的动作。")
+            elif recording_stage == 1:
+                recording_stage = 2
+                print("\n[状态] 结束【第一次录制】。")
+                show_popup("提示", "【第一次录制】已结束！\n准备好后，可再次按空格开始第二次录制。")
+            elif recording_stage == 2:
+                recording_stage = 3
+                print("\n[状态] 开始【第二次录制】...")
+                show_popup("提示", "【第二次录制】已开始！请继续执行您的动作。")
+            elif recording_stage == 3:
+                recording_stage = 4
+                print("\n[状态] 结束【第二次录制】。准备提交生成...")
+                show_popup("提示", "【第二次录制】已结束！\n程序正在后台呼叫 Gemini 编译代码，请稍候...")
+                return False # 停止键盘监听，开始进入生成环节
+    except Exception as e:
+        print("监听异常:", e)
+
 def on_click(x, y, button, pressed):
-    global is_recording
-    if button == mouse.Button.middle and pressed:
-        print("\n[录制结束] 正在对接 Gemini 3 Flash 分析视觉逻辑...")
-        return False
-    
-    if button == mouse.Button.left and pressed:
-        if not is_recording:
-            print("[开始录制] 记录动作中...")
-            is_recording = True
-            
-    if is_recording and pressed:
+    # 只有在阶段 1 或 3（录制中）时才记录鼠标点击和截图
+    if (recording_stage == 1 or recording_stage == 3) and pressed:
         action = f"Clicked {button} at ({x}, {y})"
         recorded_actions.append(action)
-        print(f"记录: {action}")
+        print(f"记录动作: {action}")
         
         try:
             monitor = sct.monitors[1]
@@ -152,12 +188,21 @@ def on_click(x, y, button, pressed):
         img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
         screenshots.append(img)
 
+# 同时启动鼠标监听和键盘监听
+def start_listeners():
+    with keyboard.Listener(on_press=on_press) as k_listener, \
+         mouse.Listener(on_click=on_click) as m_listener:
+        k_listener.join()
+        m_listener.join()
+
+start_listeners()
+
 # ================= 核心：生成与自动打包 =================
 def generate_and_build():
     print("[代码生成中] AI 正在编写无需外置依赖的 OCR 自动化脚本...")
     
     prompt = f'''
-    我刚才执行了点击：{recorded_actions}。
+    我刚才执行了点击动作序列：{recorded_actions}。
     截图中的特定区域包含动态算术题。请通过视觉识别判断出算术题所在的屏幕区域，给出精确的 bbox (x1, y1, x2, y2) 坐标。
     请严格根据以下要求输出完整的代码，**不要输出任何解释性的 Markdown 文本**。
     '''
@@ -189,18 +234,15 @@ def generate_and_build():
         print(f"[API 错误] {e}")
         return
     
-    # Python / EXE 产出链
     if '1' in targets or '2' in targets:
         py_match = re.search(r'<python>(.*?)</python>', result_text, re.DOTALL | re.IGNORECASE)
         if py_match:
             py_code = py_match.group(1).strip().replace('```python', '').replace('```', '')
-            
             with open("AutoWorker.py", "w", encoding="utf-8") as f:
                 f.write(py_code)
             
             if '2' in targets:
-                print("[自动编译] 正在调用 PyInstaller 封装独立 EXE (这需要大约 10-30 秒)...")
-                # 自动静默安装打包所需的所有纯 Python 依赖
+                print("[自动编译] 正在调用 PyInstaller 封装独立 EXE...")
                 subprocess.run("pip install pyautogui pynput ddddocr Pillow pyinstaller >nul 2>&1", shell=True)
                 subprocess.run("pyinstaller --onefile --noconsole AutoWorker.py", shell=True)
                 
@@ -208,7 +250,6 @@ def generate_and_build():
                     if os.path.exists("AutoWorker_Final.exe"): os.remove("AutoWorker_Final.exe")
                     os.rename(r"dist\AutoWorker.exe", "AutoWorker_Final.exe")
                 
-                # 暴力清理构建现场
                 subprocess.run("rmdir /s /q build dist __pycache__ 2>nul & del AutoWorker.spec 2>nul", shell=True)
                 
                 if '1' not in targets:
@@ -218,7 +259,6 @@ def generate_and_build():
         else:
             print("[警告] AI 格式错误。")
             
-    # Java 产出链
     if '3' in targets:
         pom_match = re.search(r'<pom>(.*?)</pom>', result_text, re.DOTALL | re.IGNORECASE)
         java_match = re.search(r'<java>(.*?)</java>', result_text, re.DOTALL | re.IGNORECASE)
@@ -231,6 +271,4 @@ def generate_and_build():
             print("👉 Java Maven 项目已生成至：./JavaWorker")
 
 if __name__ == "__main__":
-    with mouse.Listener(on_click=on_click) as listener:
-        listener.join()
     generate_and_build()

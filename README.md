@@ -26,4 +26,4 @@
 ```bash
 pip install mss pynput google-generativeai Pillow pyinstaller pyautogui ddddocr
 
-注:需要在windows系统运行
+#注:需要在windows系统运行
